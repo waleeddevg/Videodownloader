@@ -1,0 +1,365 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create project files
+        run: |
+          mkdir -p proj/app
+          cat > proj/app/build.gradle.kts <<'EOF_0'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.videosaver"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.example.videosaver"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF_0
+          mkdir -p proj/app/src/main
+          cat > proj/app/src/main/AndroidManifest.xml <<'EOF_1'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission
+                  android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+                  android:maxSdkVersion="28" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/stat_sys_download_done"
+                  android:label="@string/app_name"
+                  android:theme="@style/AppTheme">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <!-- Doosri app se link share karke seedha yahan khol sakte hain -->
+                      <intent-filter>
+                          <action android:name="android.intent.action.SEND" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <data android:mimeType="text/plain" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_1
+          mkdir -p proj/app/src/main/java/com/example/videosaver
+          cat > proj/app/src/main/java/com/example/videosaver/MainActivity.kt <<'EOF_2'
+          package com.example.videosaver
+
+          import android.Manifest
+          import android.app.Activity
+          import android.app.DownloadManager
+          import android.content.ClipboardManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Environment
+          import android.os.Handler
+          import android.os.Looper
+          import android.webkit.URLUtil
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.ProgressBar
+          import android.widget.TextView
+          import android.widget.Toast
+
+          /**
+           * Simple downloader: direct video file links (.mp4, .webm ...) ko
+           * phone ke Downloads/VideoSaver folder mein save karta hai.
+           * Ye kisi platform ki restriction ya watermark nahi hatata.
+           */
+          class MainActivity : Activity() {
+
+              private lateinit var urlInput: EditText
+              private lateinit var statusText: TextView
+              private lateinit var progressBar: ProgressBar
+              private lateinit var downloadManager: DownloadManager
+
+              private val handler = Handler(Looper.getMainLooper())
+              private var currentDownloadId: Long = -1L
+              private var pendingUrl: String? = null
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+
+                  downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                  urlInput = findViewById(R.id.urlInput)
+                  statusText = findViewById(R.id.statusText)
+                  progressBar = findViewById(R.id.progressBar)
+
+                  findViewById<Button>(R.id.pasteButton).setOnClickListener { pasteFromClipboard() }
+                  findViewById<Button>(R.id.downloadButton).setOnClickListener {
+                      startDownload(urlInput.text.toString().trim())
+                  }
+
+                  // Doosri app se share kiya hua link
+                  if (intent?.action == Intent.ACTION_SEND) {
+                      intent.getStringExtra(Intent.EXTRA_TEXT)?.let { urlInput.setText(it.trim()) }
+                  }
+              }
+
+              private fun pasteFromClipboard() {
+                  val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                  val text = clipboard.primaryClip?.getItemAt(0)?.text?.toString()
+                  if (text.isNullOrBlank()) {
+                      Toast.makeText(this, "Clipboard khali hai", Toast.LENGTH_SHORT).show()
+                  } else {
+                      urlInput.setText(text.trim())
+                  }
+              }
+
+              private fun startDownload(url: String) {
+                  if (!URLUtil.isNetworkUrl(url)) {
+                      statusText.text = "Sahi link daalein (http:// ya https:// se shuru hona chahiye)."
+                      return
+                  }
+
+                  // Android 9 aur us se purane phones par storage permission chahiye
+                  if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+                      checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                      != PackageManager.PERMISSION_GRANTED
+                  ) {
+                      pendingUrl = url
+                      requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 1)
+                      return
+                  }
+
+                  val fileName = URLUtil.guessFileName(url, null, "video/mp4")
+                  val request = DownloadManager.Request(Uri.parse(url))
+                      .setTitle(fileName)
+                      .setDescription("Video Saver")
+                      .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                      .setDestinationInExternalPublicDir(
+                          Environment.DIRECTORY_DOWNLOADS, "VideoSaver/$fileName"
+                      )
+
+                  currentDownloadId = downloadManager.enqueue(request)
+                  statusText.text = "Download shuru ho gaya: $fileName"
+                  progressBar.progress = 0
+                  progressBar.visibility = android.view.View.VISIBLE
+                  handler.post(progressChecker)
+              }
+
+              override fun onRequestPermissionsResult(
+                  requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+              ) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode == 1 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                      pendingUrl?.let { startDownload(it) }
+                  } else {
+                      statusText.text = "Download ke liye storage permission zaroori hai."
+                  }
+              }
+
+              private val progressChecker = object : Runnable {
+                  override fun run() {
+                      val cursor = downloadManager.query(DownloadManager.Query().setFilterById(currentDownloadId))
+                      cursor.use {
+                          if (!it.moveToFirst()) return
+                          val status = it.getInt(it.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+                          val downloaded = it.getLong(it.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+                          val total = it.getLong(it.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+
+                          when (status) {
+                              DownloadManager.STATUS_SUCCESSFUL -> {
+                                  progressBar.progress = 100
+                                  statusText.text = "Mukammal! Video Downloads/VideoSaver folder mein save ho gayi."
+                                  return
+                              }
+                              DownloadManager.STATUS_FAILED -> {
+                                  progressBar.visibility = android.view.View.GONE
+                                  statusText.text = "Download fail ho gaya. Link direct video file ka hona chahiye " +
+                                      "aur server download allow karta ho."
+                                  return
+                              }
+                              else -> {
+                                  if (total > 0) {
+                                      progressBar.progress = ((downloaded * 100) / total).toInt()
+                                      statusText.text = "Download ho raha hai... ${progressBar.progress}%"
+                                  }
+                              }
+                          }
+                      }
+                      handler.postDelayed(this, 700)
+                  }
+              }
+
+              override fun onDestroy() {
+                  handler.removeCallbacks(progressChecker)
+                  super.onDestroy()
+              }
+          }
+          EOF_2
+          mkdir -p proj/app/src/main/res/layout
+          cat > proj/app/src/main/res/layout/activity_main.xml <<'EOF_3'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="20dp">
+
+              <TextView
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="Video Saver"
+                  android:textSize="26sp"
+                  android:textStyle="bold"
+                  android:textColor="#1E88E5" />
+
+              <TextView
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="6dp"
+                  android:text="Video ka direct link (.mp4, .webm) paste karein aur download karein. Sirf wo videos jo aapki apni hain ya jinko download karne ki ijazat hai."
+                  android:textSize="14sp"
+                  android:textColor="#555555" />
+
+              <EditText
+                  android:id="@+id/urlInput"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="20dp"
+                  android:hint="https://example.com/video.mp4"
+                  android:inputType="textUri"
+                  android:minHeight="52dp" />
+
+              <Button
+                  android:id="@+id/pasteButton"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="8dp"
+                  android:text="Clipboard se paste karein" />
+
+              <Button
+                  android:id="@+id/downloadButton"
+                  android:layout_width="match_parent"
+                  android:layout_height="56dp"
+                  android:layout_marginTop="12dp"
+                  android:text="Download"
+                  android:textSize="16sp" />
+
+              <TextView
+                  android:id="@+id/statusText"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="20dp"
+                  android:textSize="14sp"
+                  android:textColor="#333333" />
+
+              <ProgressBar
+                  android:id="@+id/progressBar"
+                  style="?android:attr/progressBarStyleHorizontal"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="8dp"
+                  android:max="100"
+                  android:visibility="gone" />
+
+          </LinearLayout>
+          EOF_3
+          mkdir -p proj/app/src/main/res/values
+          cat > proj/app/src/main/res/values/strings.xml <<'EOF_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Video Saver</string>
+          </resources>
+          EOF_4
+          mkdir -p proj/app/src/main/res/values
+          cat > proj/app/src/main/res/values/themes.xml <<'EOF_5'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="android:Theme.Material.Light.NoActionBar">
+                  <item name="android:colorPrimary">#1E88E5</item>
+                  <item name="android:statusBarColor">#1E88E5</item>
+              </style>
+          </resources>
+          EOF_5
+          cat > proj/build.gradle.kts <<'EOF_6'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_6
+          cat > proj/gradle.properties <<'EOF_7'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          EOF_7
+          cat > proj/settings.gradle.kts <<'EOF_8'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "VideoSaver"
+          include(":app")
+          EOF_8
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Build debug APK
+        working-directory: proj
+        run: gradle assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VideoSaver-apk
+          path: proj/app/build/outputs/apk/debug/app-debug.apk
+          
